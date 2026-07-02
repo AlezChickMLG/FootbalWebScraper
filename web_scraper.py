@@ -5,12 +5,13 @@ import os
 import traceback
 from request_component import RequestComponent
 from pprint import pprint
+from playwright._impl._errors import TimeoutError as PlaywrightTimeoutError
 
 class FlashscoreWebScraper:
-    def __init__(self):
+    def __init__(self, headless=True):
         self.sync_playwright = sync_playwright().start()
         self.browser = self.sync_playwright.chromium.launch(
-            headless=True,
+            headless=headless,
         )
         self.context = self.browser.new_context()
         self.page = self.context.new_page()
@@ -34,16 +35,16 @@ class FlashscoreWebScraper:
         self.page.goto(self.flashscore_url)
 
     #Intoarce toate echipele recomandate de bara de cautare
-    def get_team_url(self, team):
+    def get_team_url(self, team_name):
         try:
             self.page.click("#search-window")
             print("Am apasat pe buton de cautare pentru a deschide meniul")
 
             self.page.wait_for_selector(".searchInput__input")
-            self.page.fill(".searchInput__input", team)
-            print(f"Am introdus {team} la cautare")
+            self.page.fill(".searchInput__input", team_name)
+            print(f"Am introdus {team_name} la cautare")
 
-            self.page.wait_for_selector(".searchResult")
+            self.page.wait_for_selector(".searchResult", timeout=10000)
             search_result = self.page.query_selector_all(".searchResult")
 
             for result in search_result:
@@ -51,12 +52,18 @@ class FlashscoreWebScraper:
                 # category = result.query_selector(".searchResult__participantCategory").inner_text()
                 href = result.get_attribute("href")
 
-                if name.strip().lower() == team.strip().lower():
+                print(f"Checking {name}")
+
+                if name.strip().lower() == team_name.strip().lower():
                     return href
 
             return None
+        except PlaywrightTimeoutError as e:
+            print(f"Nu au fost gasite echipe sub denumirea de {team_name}")
+            return False
+
         except Exception as e:
-            print(f"Eroare intampinata la gasirea echipei {team}")
+            print(f"Eroare intampinata la gasirea echipei {team_name}")
             return False
 
     def get_all_matches(self, time_limit=None):
@@ -102,13 +109,10 @@ class FlashscoreWebScraper:
 
     def get_statistics(self):
         try:
-            self.page.wait_for_selector(".section")
+            self.page.wait_for_selector("div[data-testid='wcl-statistics']")
             statistics = self.page.query_selector_all(".section")
 
             statistics_dict = {}
-
-            #os.makedirs(f"matches_{team}", exist_ok=True)
-            #with open(f"matches_{team}/output_txt_{home_team_name}-{away_team_name}|{start_time.replace(' ', '-')}""w") as output_file:
 
             if statistics:
                 for section in statistics:
@@ -122,9 +126,6 @@ class FlashscoreWebScraper:
 
                     title_name = title_name_statistics.inner_text()
                     statistics_dict[title_name] = {}
-
-                    #output_file.write(f"{title_name}\n")
-                    #print(f"{title_name}")
 
                     if individual_statistics is None:
                         print("Eroare: nu au fost gasite statisticile individuale")
@@ -153,96 +154,110 @@ class FlashscoreWebScraper:
             print(f"Am intampinat o eroare la procesarea statisticilor: {e}")
             traceback.print_exc()
 
-    def process_info(self, info, limit=1):
-        team = info["team"]
-        print(f"Prelucram echipa {team}")
+    def navigate_to_team_page(self, team_url):
+        full_team_url = f"{self.flashscore_url}{team_url}"
+        self.page.goto(full_team_url)
+        print(f"Am intrat pe pagina echipei")
+
+    def navigate_to_results_page(self):
+        results_href_element = self.page.query_selector("a.tabs__tab[title='Rezultate']")
+        results_href = results_href_element.get_attribute("href")
+
+        result_url = f"{self.flashscore_url_no_slash}{results_href}"
+
+        self.page.goto(result_url)
+        print("Am deschis sectiunea de rezultate")
+
+    def navigate_to_match_page(self, match_url):
+        self.page.goto(match_url)
+        print("Am intrat pe pagina meciului")
+
+    def navigate_to_statistics_tab(self):
+        all_buttons = self.page.query_selector_all(".filterOver div a")
+        statistics_button = all_buttons[1]
+        button_href = statistics_button.get_attribute("href")
+        self.page.goto(f"{self.flashscore_url_no_slash}{button_href}")
+        print("Am ajuns pe pagina de statistici")
+
+    def process_info(self, info, limit=10):
+        team_name = info["team"]
+        print(f"Prelucram echipa {team_name}")
 
         #mergem inapoi la pagina principala
         self.reset_page()
         print(f"Am resetat pagina")
 
         #obtine url echipei
-        team_url = self.get_team_url(team)
+        team_url = self.get_team_url(team_name)
 
         #verificam daca a returnat un link valid
-        if team is None:
-            print(f"Nu am gasit echipa {team}")
+        if team_url is None:
+            print(f"Nu am gasit echipa {team_name}")
             return
 
-        elif team is not False:
-            full_team_url = f"{self.flashscore_url}{team_url}"
-            self.page.goto(full_team_url)
-            print(f"Am intrat pe pagina echipei {team}")
+        elif team_url is not False:
+            #navigam catre pagina echipei
+            self.navigate_to_team_page(team_url)
 
-            self.page.wait_for_selector("a.tabs__tab[title='Rezultate']")
-            results_href_element = self.page.query_selector("a.tabs__tab[title='Rezultate']")
-            results_href = results_href_element.get_attribute("href")
+            try:
+                self.page.wait_for_selector("a.tabs__tab[title='Rezultate']")
+            except Exception as e:
+                print("A expirat timeout-ul")
 
-            result_url = f"{self.flashscore_url_no_slash}{results_href}"
-
-            self.page.goto(result_url)
-            print("Am deschis sectiunea de rezultate")
+            #navigam catre pagina de rezultate
+            self.navigate_to_results_page()
 
             #obtinem toate meciurile
             matches = self.get_all_matches()
 
-            if matches:
-                for match_index, match in enumerate(matches):
-                    if match_index >= limit:
-                        break
+            #procesam meciurile
+            self.process_matches(matches, limit)
 
-                    #print(f"Obtinem statisticile pentru meciul {match['home_team']} - {match['away_team']} disputat la data de {match['start_time']}")
-                    pprint(match)
-                    self.page.goto(match['match_url'])
-                    print("Am intrat pe pagina meciului")
+    def process_matches(self, matches, limit):
+        for match_index, match in enumerate(matches):
+            if match_index >= limit:
+                print("Am terminat de procesat statisticile")
+                break
 
-                    #navigam la tabul statisticilor
-                    all_buttons = self.page.query_selector(".filterOver").query_selector("div").query_selector_all("a")
-                    statistics_button = all_buttons[1]
-                    button_href = statistics_button.get_attribute("href")
-                    self.page.goto(f"{self.flashscore_url_no_slash}{button_href}")
-                    print("Am ajuns pe pagina de statistici")
+            # print(f"Obtinem statisticile pentru meciul {match['home_team']} - {match['away_team']} disputat la data de {match['start_time']}")
+            pprint(match)
+            self.navigate_to_match_page(match['match_url'])
 
-                    #obtinem statisticile
-                    self.page.wait_for_selector(".section")
-                    statistics = self.get_statistics()
-                    pprint(statistics)
+            # navigam la tabul statisticilor
+            self.navigate_to_statistics_tab()
 
-                    #scriem rezultatele
-                    self.write_to_file(team, match, statistics)
+            # obtinem statisticile
+            self.page.wait_for_selector(".section")
+            statistics = self.get_statistics()
+            pprint(statistics)
 
-                    #ne intoarcem la pagina meciurilor
-                    # self.page.goto(result_url)
-                    # print("M-am intors pe pagina de rezultate")
+            # scriem rezultatele
+            if statistics:
+                self.write_to_file(team, match, statistics)
 
-    def write_to_file(self, team, match, statistics):
-        os.makedirs(f"output/{team}", exist_ok=True)
+            else:
+                print("Nu am putat procesa statisticile sau nu exista")
 
-        with open(f"output/{team}/{match['home_team']}-{match['away_team']}|{match['start_time'].replace(' ', '-')}", "w") as output_file:
+    def write_to_file(self, team_name, match, statistics):
+        os.makedirs(f"output/{team_name}", exist_ok=True)
+
+        with open(f"output/{team_name}/{match['home_team']}-{match['away_team']}|{match['start_time'].replace(' ', '-')}", "w") as output_file:
             for (category, all_stats) in statistics.items():
                 output_file.write(f"{category}\n")
                 for (stat_name, values) in all_stats.items():
                     output_file.write(f"{stat_name}: {values['home']} | {values['away']}\n")
                 output_file.write("\n")
 
-
-
-
     def run(self):
         info = self.request_component.send_info()
 
         if info:
-            self.process_info(info)
-
-# team_url = f"{flashscore_url}{href}"
-# page.goto(team_url)
-# print(f"Am deschis pagina echipei {team}")
-
-# page.goto(match_url)
-# print("Am intrat pe meci")
+            self.process_info(info, limit=1)
 
 if __name__ == "__main__":
     web_scraper = FlashscoreWebScraper()
-    web_scraper.process_info({
-        "team": "Spania"
-    })
+    teams = ["Ecuador"]
+    for team in teams:
+        web_scraper.process_info({
+            "team": team
+        })
